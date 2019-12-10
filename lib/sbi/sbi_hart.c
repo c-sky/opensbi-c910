@@ -95,6 +95,9 @@ static int delegate_traps(struct sbi_scratch *scratch, u32 hartid)
 	if (misa_extension('H'))
 		exceptions |= (1U << CAUSE_SUPERVISOR_ECALL);
 
+	/* Delegate 0 ~ 7 exceptions to S-mode */
+	exceptions |= 0xff;
+
 	csr_write(CSR_MIDELEG, interrupts);
 	csr_write(CSR_MEDELEG, exceptions);
 

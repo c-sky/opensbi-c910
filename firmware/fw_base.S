@@ -41,17 +41,26 @@
 999:
 .endm
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.globl _start
 	.globl _start_warm
 _start:
-	/*
-	 * Jump to warm-boot if this is not the first core booting,
-	 * that is, for mhartid != 0
-	 */
-	csrr	a6, CSR_MHARTID
-	blt	zero, a6, _wait_relocate_copy_done
+	/* Find preferred boot HART id */
+	MOV_3R	s0, a0, s1, a1, s2, a2
+	call	fw_boot_hart
+	add	a6, a0, zero
+	MOV_3R	a0, s0, a1, s1, a2, s2
+	li	a7, -1
+	beq	a6, a7, _try_lottery
+	/* Jump to relocation wait loop if we are not boot hart */
+	bne	a0, a6, _wait_relocate_copy_done
+_try_lottery:
+	/* Jump to relocation wait loop if we don't get relocation lottery */
+	la	a6, _relocate_lottery
+	li	a7, 1
+	amoadd.w a6, a7, (a6)
+	bnez	a6, _wait_relocate_copy_done
 
 	/* Save load address */
 	la	t0, _load_start
@@ -75,6 +84,8 @@ _relocate:
 	blt	t2, t0, _relocate_copy_to_upper
 _relocate_copy_to_lower:
 	ble	t1, t2, _relocate_copy_to_lower_loop
+	la	t3, _relocate_lottery
+	BRANGE	t2, t1, t3, _start_hang
 	la	t3, _boot_status
 	BRANGE	t2, t1, t3, _start_hang
 	la	t3, _relocate
@@ -91,6 +102,8 @@ _relocate_copy_to_lower_loop:
 	jr	t4
 _relocate_copy_to_upper:
 	ble	t3, t0, _relocate_copy_to_upper_loop
+	la	t2, _relocate_lottery
+	BRANGE	t0, t3, t2, _start_hang
 	la	t2, _boot_status
 	BRANGE	t0, t3, t2, _start_hang
 	la	t2, _relocate
@@ -381,6 +394,8 @@ _start_warm:
 	j	_start_hang
 
 	.align 3
+_relocate_lottery:
+	RISCV_PTR	0
 _boot_status:
 	RISCV_PTR	0
 _load_start:
@@ -390,8 +405,8 @@ _link_start:
 _link_end:
 	RISCV_PTR	_fw_reloc_end
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.globl _hartid_to_scratch
 _hartid_to_scratch:
 	add	sp, sp, -(3 * __SIZEOF_POINTER__)
@@ -425,15 +440,15 @@ _hartid_to_scratch:
 	add	sp, sp, (3 * __SIZEOF_POINTER__)
 	ret
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.globl _start_hang
 _start_hang:
 	wfi
 	j	_start_hang
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.globl _trap_handler
 _trap_handler:
 	/* Swap TP and MSCRATCH */
@@ -588,8 +603,8 @@ _skip_mstatush_restore:
 
 	mret
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.globl _reset_regs
 _reset_regs:
 

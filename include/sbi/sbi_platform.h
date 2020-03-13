@@ -41,10 +41,11 @@
 
 #ifndef __ASSEMBLY__
 
-#include <sbi/sbi_version.h>
-#include <sbi/sbi_scratch.h>
 #include <sbi/sbi_ecall.h>
 #include <sbi/sbi_error.h>
+#include <sbi/sbi_scratch.h>
+#include <sbi/sbi_trap.h>
+#include <sbi/sbi_version.h>
 
 /** Possible feature flags of a platform */
 enum sbi_platform_features {
@@ -75,6 +76,21 @@ struct sbi_platform_operations {
 	/** Platform final initialization */
 	int (*final_init)(bool cold_boot);
 
+	/** Platform early exit */
+	void (*early_exit)(void);
+	/** Platform final exit */
+	void (*final_exit)(void);
+
+	/** For platforms that do not implement misa, non-standard
+	 * methods are needed to determine cpu extension.
+	 */
+	int (*misa_check_extension)(char ext);
+
+	/** For platforms that do not implement misa, non-standard
+	 * methods are needed to get MXL field of misa.
+	 */
+	int (*misa_get_xlen)(void);
+
 	/** Get number of PMP regions for given HART */
 	u32 (*pmp_region_count)(u32 hartid);
 	/**
@@ -93,6 +109,8 @@ struct sbi_platform_operations {
 
 	/** Initialize the platform interrupt controller for current HART */
 	int (*irqchip_init)(bool cold_boot);
+	/** Exit the platform interrupt controller for current HART */
+	void (*irqchip_exit)(void);
 
 	/** Send IPI to a target HART */
 	void (*ipi_send)(u32 target_hart);
@@ -100,6 +118,8 @@ struct sbi_platform_operations {
 	void (*ipi_clear)(u32 target_hart);
 	/** Initialize IPI for current HART */
 	int (*ipi_init)(bool cold_boot);
+	/** Exit IPI for current HART */
+	void (*ipi_exit)(void);
 
 	/** Get platform timer value */
 	u64 (*timer_value)(void);
@@ -109,6 +129,8 @@ struct sbi_platform_operations {
 	void (*timer_event_stop)(void);
 	/** Initialize platform timer for current HART */
 	int (*timer_init)(bool cold_boot);
+	/** Exit platform timer for current HART */
+	void (*timer_exit)(void);
 
 	/** Reboot the platform */
 	int (*system_reboot)(u32 type);
@@ -119,9 +141,9 @@ struct sbi_platform_operations {
 	int (*vendor_ext_check)(long extid);
 	/** platform specific SBI extension implementation provider */
 	int (*vendor_ext_provider)(long extid, long funcid,
-			unsigned long *args, unsigned long *out_value,
-			unsigned long *out_trap_cause,
-			unsigned long *out_trap_val);
+				   unsigned long *args,
+				   unsigned long *out_value,
+				   struct sbi_trap_info *out_trap);
 } __packed;
 
 /** Representation of a platform */
@@ -189,13 +211,13 @@ struct sbi_platform {
  *
  * @param plat pointer to struct sbi_platform
  *
- * @return pointer to platform name on success and NULL on failure
+ * @return pointer to platform name on success and "Unknown" on failure
  */
 static inline const char *sbi_platform_name(const struct sbi_platform *plat)
 {
 	if (plat)
 		return plat->name;
-	return NULL;
+	return "Unknown";
 }
 
 /**
@@ -288,6 +310,58 @@ static inline int sbi_platform_final_init(const struct sbi_platform *plat,
 	if (plat && sbi_platform_ops(plat)->final_init)
 		return sbi_platform_ops(plat)->final_init(cold_boot);
 	return 0;
+}
+
+/**
+ * Early exit for current HART
+ *
+ * @param plat pointer to struct sbi_platform
+ */
+static inline void sbi_platform_early_exit(const struct sbi_platform *plat)
+{
+	if (plat && sbi_platform_ops(plat)->early_exit)
+		sbi_platform_ops(plat)->early_exit();
+}
+
+/**
+ * Final exit for current HART
+ *
+ * @param plat pointer to struct sbi_platform
+ */
+static inline void sbi_platform_final_exit(const struct sbi_platform *plat)
+{
+	if (plat && sbi_platform_ops(plat)->final_exit)
+		sbi_platform_ops(plat)->final_exit();
+}
+
+/**
+ * Check CPU extension in MISA
+ *
+ * @param plat pointer to struct sbi_platform
+ * @param ext shorthand letter for CPU extensions
+ *
+ * @return zero for not-supported and non-zero for supported
+ */
+static inline int sbi_platform_misa_extension(const struct sbi_platform *plat,
+					      char ext)
+{
+	if (plat && sbi_platform_ops(plat)->misa_check_extension)
+		return sbi_platform_ops(plat)->misa_check_extension(ext);
+	return 0;
+}
+
+/**
+ * Get MXL field of MISA
+ *
+ * @param plat pointer to struct sbi_platform
+ *
+ * @return 1/2/3 on success and error code on failure
+ */
+static inline int sbi_platform_misa_xlen(const struct sbi_platform *plat)
+{
+	if (plat && sbi_platform_ops(plat)->misa_get_xlen)
+		return sbi_platform_ops(plat)->misa_get_xlen();
+	return -1;
 }
 
 /**
@@ -388,6 +462,17 @@ static inline int sbi_platform_irqchip_init(const struct sbi_platform *plat,
 }
 
 /**
+ * Exit the platform interrupt controller for current HART
+ *
+ * @param plat pointer to struct sbi_platform
+ */
+static inline void sbi_platform_irqchip_exit(const struct sbi_platform *plat)
+{
+	if (plat && sbi_platform_ops(plat)->irqchip_exit)
+		sbi_platform_ops(plat)->irqchip_exit();
+}
+
+/**
  * Send IPI to a target HART
  *
  * @param plat pointer to struct sbi_platform
@@ -427,6 +512,17 @@ static inline int sbi_platform_ipi_init(const struct sbi_platform *plat,
 	if (plat && sbi_platform_ops(plat)->ipi_init)
 		return sbi_platform_ops(plat)->ipi_init(cold_boot);
 	return 0;
+}
+
+/**
+ * Exit the platform IPI support for current HART
+ *
+ * @param plat pointer to struct sbi_platform
+ */
+static inline void sbi_platform_ipi_exit(const struct sbi_platform *plat)
+{
+	if (plat && sbi_platform_ops(plat)->ipi_exit)
+		sbi_platform_ops(plat)->ipi_exit();
 }
 
 /**
@@ -485,6 +581,17 @@ static inline int sbi_platform_timer_init(const struct sbi_platform *plat,
 }
 
 /**
+ * Exit the platform timer for current HART
+ *
+ * @param plat pointer to struct sbi_platform
+ */
+static inline void sbi_platform_timer_exit(const struct sbi_platform *plat)
+{
+	if (plat && sbi_platform_ops(plat)->timer_exit)
+		sbi_platform_ops(plat)->timer_exit();
+}
+
+/**
  * Reboot the platform
  *
  * @param plat pointer to struct sbi_platform
@@ -540,25 +647,23 @@ static inline int sbi_platform_vendor_ext_check(const struct sbi_platform *plat,
  * @param extid	vendor SBI extension id
  * @param funcid SBI function id within the extension id
  * @param args pointer to arguments passed by the caller
- * @param out_value output value that can be filled the callee
- * @param out_tcause trap cause that can be filled the callee
- * @param out_tvalue possible trap value that can be filled the callee
+ * @param out_value output value that can be filled by the callee
+ * @param out_trap trap info that can be filled by the callee
  *
  * @return 0 on success and negative error code on failure
  */
-static inline int sbi_platform_vendor_ext_provider(const struct sbi_platform *plat,
-						   long extid, long funcid,
-						   unsigned long *args,
-						   unsigned long *out_value,
-						   unsigned long *out_tcause,
-						   unsigned long *out_tval)
+static inline int sbi_platform_vendor_ext_provider(
+					const struct sbi_platform *plat,
+					long extid, long funcid,
+					unsigned long *args,
+					unsigned long *out_value,
+					struct sbi_trap_info *out_trap)
 {
 	if (plat && sbi_platform_ops(plat)->vendor_ext_provider) {
 		return sbi_platform_ops(plat)->vendor_ext_provider(extid,
-								   funcid, args,
-								  out_value,
-								  out_tcause,
-								  out_tval);
+								funcid, args,
+								out_value,
+								out_trap);
 	}
 
 	return SBI_ENOTSUPP;

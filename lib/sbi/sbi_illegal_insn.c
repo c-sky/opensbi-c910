@@ -9,12 +9,12 @@
 
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_encoding.h>
-#include <sbi/riscv_unpriv.h>
 #include <sbi/sbi_bits.h>
 #include <sbi/sbi_emulate_csr.h>
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_illegal_insn.h>
 #include <sbi/sbi_trap.h>
+#include <sbi/sbi_unpriv.h>
 
 typedef int (*illegal_insn_func)(ulong insn, u32 hartid, ulong mcause,
 				 struct sbi_trap_regs *regs,
@@ -24,7 +24,15 @@ static int truly_illegal_insn(ulong insn, u32 hartid, ulong mcause,
 			      struct sbi_trap_regs *regs,
 			      struct sbi_scratch *scratch)
 {
-	return sbi_trap_redirect(regs, scratch, regs->mepc, mcause, insn);
+	struct sbi_trap_info trap;
+
+	trap.epc = regs->mepc;
+	trap.cause = mcause;
+	trap.tval = insn;
+	trap.tval2 = 0;
+	trap.tinst = 0;
+
+	return sbi_trap_redirect(regs, &trap, scratch);
 }
 
 static int system_opcode_insn(ulong insn, u32 hartid, ulong mcause,
@@ -46,8 +54,8 @@ static int system_opcode_insn(ulong insn, u32 hartid, ulong mcause,
 	if ((regs->mstatus & MSTATUS_MPV) &&
 #endif
 	    (insn & INSN_MASK_WFI) == INSN_MATCH_WFI)
-		return sbi_trap_redirect(regs, scratch,
-					 regs->mepc, mcause, insn);
+		return truly_illegal_insn(insn, hartid, mcause,
+					  regs, scratch);
 
 	if (sbi_emulate_csr_read(csr_num, hartid, regs, scratch, &csr_val))
 		return truly_illegal_insn(insn, hartid, mcause,
@@ -125,24 +133,20 @@ static illegal_insn_func illegal_insn_table[32] = {
 	truly_illegal_insn  /* 31 */
 };
 
-int sbi_illegal_insn_handler(u32 hartid, ulong mcause,
+int sbi_illegal_insn_handler(u32 hartid, ulong mcause, ulong insn,
 			     struct sbi_trap_regs *regs,
 			     struct sbi_scratch *scratch)
 {
-	ulong insn = csr_read(CSR_MTVAL);
-#if __riscv_xlen == 32
-	bool virt = (regs->mstatusH & MSTATUSH_MPV) ? TRUE : FALSE;
-#else
-	bool virt = (regs->mstatus & MSTATUS_MPV) ? TRUE : FALSE;
-#endif
-	struct unpriv_trap uptrap;
+	struct sbi_trap_info uptrap;
 
 	if (unlikely((insn & 3) != 3)) {
 		if (insn == 0) {
-			insn = get_insn(regs->mepc, virt, scratch, &uptrap);
-			if (uptrap.cause)
-				return sbi_trap_redirect(regs, scratch,
-					regs->mepc, uptrap.cause, uptrap.tval);
+			insn = sbi_get_insn(regs->mepc, scratch, &uptrap);
+			if (uptrap.cause) {
+				uptrap.epc = regs->mepc;
+				return sbi_trap_redirect(regs, &uptrap,
+							 scratch);
+			}
 		}
 		if ((insn & 3) != 3)
 			return truly_illegal_insn(insn, hartid, mcause, regs,

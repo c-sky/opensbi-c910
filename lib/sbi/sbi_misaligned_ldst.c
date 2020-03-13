@@ -9,11 +9,11 @@
 
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_encoding.h>
-#include <sbi/riscv_unpriv.h>
 #include <sbi/riscv_fp.h>
 #include <sbi/sbi_error.h>
 #include <sbi/sbi_misaligned_ldst.h>
 #include <sbi/sbi_trap.h>
+#include <sbi/sbi_unpriv.h>
 
 union reg_data {
 	u8 data_bytes[8];
@@ -22,23 +22,32 @@ union reg_data {
 };
 
 int sbi_misaligned_load_handler(u32 hartid, ulong mcause,
+				ulong addr, ulong tval2, ulong tinst,
 				struct sbi_trap_regs *regs,
 				struct sbi_scratch *scratch)
 {
+	ulong insn;
 	union reg_data val;
-	struct unpriv_trap uptrap;
-	ulong addr = csr_read(CSR_MTVAL);
+	struct sbi_trap_info uptrap;
 	int i, fp = 0, shift = 0, len = 0;
-#if __riscv_xlen == 32
-	bool virt = (regs->mstatusH & MSTATUSH_MPV) ? TRUE : FALSE;
-#else
-	bool virt = (regs->mstatus & MSTATUS_MPV) ? TRUE : FALSE;
-#endif
-	ulong insn = get_insn(regs->mepc, virt, scratch, &uptrap);
 
-	if (uptrap.cause)
-		return sbi_trap_redirect(regs, scratch, regs->mepc,
-					 uptrap.cause, uptrap.tval);
+	if (tinst & 0x1) {
+		/*
+		 * Bit[0] == 1 implies trapped instruction value is
+		 * transformed instruction or custom instruction.
+		 */
+		insn = tinst | INSN_16BIT_MASK;
+	} else {
+		/*
+		 * Bit[0] == 0 implies trapped instruction value is
+		 * zero or special value.
+		 */
+		insn = sbi_get_insn(regs->mepc, scratch, &uptrap);
+		if (uptrap.cause) {
+			uptrap.epc = regs->mepc;
+			return sbi_trap_redirect(regs, &uptrap, scratch);
+		}
+	}
 
 	if ((insn & INSN_MASK_LW) == INSN_MATCH_LW) {
 		len   = 4;
@@ -101,17 +110,23 @@ int sbi_misaligned_load_handler(u32 hartid, ulong mcause,
 #endif
 #endif
 #endif
-	} else
-		return sbi_trap_redirect(regs, scratch, regs->mepc,
-					 mcause, addr);
+	} else {
+		uptrap.epc = regs->mepc;
+		uptrap.cause = mcause;
+		uptrap.tval = addr;
+		uptrap.tval2 = tval2;
+		uptrap.tinst = tinst;
+		return sbi_trap_redirect(regs, &uptrap, scratch);
+	}
 
 	val.data_u64 = 0;
 	for (i = 0; i < len; i++) {
-		val.data_bytes[i] = load_u8((void *)(addr + i),
-					    scratch, &uptrap);
-		if (uptrap.cause)
-			return sbi_trap_redirect(regs, scratch, regs->mepc,
-						 uptrap.cause, uptrap.tval);
+		val.data_bytes[i] = sbi_load_u8((void *)(addr + i),
+						scratch, &uptrap);
+		if (uptrap.cause) {
+			uptrap.epc = regs->mepc;
+			return sbi_trap_redirect(regs, &uptrap, scratch);
+		}
 	}
 
 	if (!fp)
@@ -129,23 +144,32 @@ int sbi_misaligned_load_handler(u32 hartid, ulong mcause,
 }
 
 int sbi_misaligned_store_handler(u32 hartid, ulong mcause,
+				 ulong addr, ulong tval2, ulong tinst,
 				 struct sbi_trap_regs *regs,
 				 struct sbi_scratch *scratch)
 {
+	ulong insn;
 	union reg_data val;
-	struct unpriv_trap uptrap;
-	ulong addr = csr_read(CSR_MTVAL);
+	struct sbi_trap_info uptrap;
 	int i, len = 0;
-#if __riscv_xlen == 32
-	bool virt = (regs->mstatusH & MSTATUSH_MPV) ? TRUE : FALSE;
-#else
-	bool virt = (regs->mstatus & MSTATUS_MPV) ? TRUE : FALSE;
-#endif
-	ulong insn = get_insn(regs->mepc, virt, scratch, &uptrap);
 
-	if (uptrap.cause)
-		return sbi_trap_redirect(regs, scratch, regs->mepc,
-					 uptrap.cause, uptrap.tval);
+	if (tinst & 0x1) {
+		/*
+		 * Bit[0] == 1 implies trapped instruction value is
+		 * transformed instruction or custom instruction.
+		 */
+		insn = tinst | INSN_16BIT_MASK;
+	} else {
+		/*
+		 * Bit[0] == 0 implies trapped instruction value is
+		 * zero or special value.
+		 */
+		insn = sbi_get_insn(regs->mepc, scratch, &uptrap);
+		if (uptrap.cause) {
+			uptrap.epc = regs->mepc;
+			return sbi_trap_redirect(regs, &uptrap, scratch);
+		}
+	}
 
 	val.data_ulong = GET_RS2(insn, regs);
 
@@ -199,16 +223,22 @@ int sbi_misaligned_store_handler(u32 hartid, ulong mcause,
 #endif
 #endif
 #endif
-	} else
-		return sbi_trap_redirect(regs, scratch, regs->mepc,
-					 mcause, addr);
+	} else {
+		uptrap.epc = regs->mepc;
+		uptrap.cause = mcause;
+		uptrap.tval = addr;
+		uptrap.tval2 = tval2;
+		uptrap.tinst = tinst;
+		return sbi_trap_redirect(regs, &uptrap, scratch);
+	}
 
 	for (i = 0; i < len; i++) {
-		store_u8((void *)(addr + i), val.data_bytes[i],
-			 scratch, &uptrap);
-		if (uptrap.cause)
-			return sbi_trap_redirect(regs, scratch, regs->mepc,
-						 uptrap.cause, uptrap.tval);
+		sbi_store_u8((void *)(addr + i), val.data_bytes[i],
+			     scratch, &uptrap);
+		if (uptrap.cause) {
+			uptrap.epc = regs->mepc;
+			return sbi_trap_redirect(regs, &uptrap, scratch);
+		}
 	}
 
 	regs->mepc += INSN_LEN(insn);

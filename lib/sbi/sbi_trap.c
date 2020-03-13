@@ -9,7 +9,6 @@
 
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_encoding.h>
-#include <sbi/riscv_unpriv.h>
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_ecall.h>
 #include <sbi/sbi_error.h>
@@ -21,12 +20,17 @@
 #include <sbi/sbi_trap.h>
 
 static void __noreturn sbi_trap_error(const char *msg, int rc, u32 hartid,
-				      ulong mcause, ulong mtval,
-				      struct sbi_trap_regs *regs)
+				      ulong mcause, ulong mtval, ulong mtval2,
+				      ulong mtinst, struct sbi_trap_regs *regs)
 {
 	sbi_printf("%s: hart%d: %s (error %d)\n", __func__, hartid, msg, rc);
 	sbi_printf("%s: hart%d: mcause=0x%" PRILX " mtval=0x%" PRILX "\n",
 		   __func__, hartid, mcause, mtval);
+	if (misa_extension('H')) {
+		sbi_printf("%s: hart%d: mtval2=0x%" PRILX
+			   " mtinst=0x%" PRILX "\n",
+			   __func__, hartid, mtval2, mtinst);
+	}
 	sbi_printf("%s: hart%d: mepc=0x%" PRILX " mstatus=0x%" PRILX "\n",
 		   __func__, hartid, regs->mepc, regs->mstatus);
 	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
@@ -69,23 +73,20 @@ static void __noreturn sbi_trap_error(const char *msg, int rc, u32 hartid,
  * Redirect trap to lower privledge mode (S-mode or U-mode)
  *
  * @param regs pointer to register state
+ * @param trap pointer to trap details
  * @param scratch pointer to sbi_scratch of current HART
- * @param epc error PC for lower privledge mode
- * @param cause exception cause for lower privledge mode
- * @param tval trap value for lower privledge mode
  *
  * @return 0 on success and negative error code on failure
  */
-int sbi_trap_redirect(struct sbi_trap_regs *regs, struct sbi_scratch *scratch,
-		      ulong epc, ulong cause, ulong tval)
+int sbi_trap_redirect(struct sbi_trap_regs *regs,
+		      struct sbi_trap_info *trap,
+		      struct sbi_scratch *scratch)
 {
 	ulong hstatus, vsstatus, prev_mode;
 #if __riscv_xlen == 32
 	bool prev_virt = (regs->mstatusH & MSTATUSH_MPV) ? TRUE : FALSE;
-	bool prev_stage2 = (regs->mstatusH & MSTATUSH_MTL) ? TRUE : FALSE;
 #else
 	bool prev_virt = (regs->mstatus & MSTATUS_MPV) ? TRUE : FALSE;
-	bool prev_stage2 = (regs->mstatus & MSTATUS_MTL) ? TRUE : FALSE;
 #endif
 	/* By default, we redirect to HS-mode */
 	bool next_virt = FALSE;
@@ -96,8 +97,8 @@ int sbi_trap_redirect(struct sbi_trap_regs *regs, struct sbi_scratch *scratch,
 		return SBI_ENOTSUPP;
 
 	/* For certain exceptions from VS/VU-mode we redirect to VS-mode */
-	if (misa_extension('H') && prev_virt && !prev_stage2) {
-		switch (cause) {
+	if (misa_extension('H') && prev_virt) {
+		switch (trap->cause) {
 		case CAUSE_FETCH_PAGE_FAULT:
 		case CAUSE_LOAD_PAGE_FAULT:
 		case CAUSE_STORE_PAGE_FAULT:
@@ -108,20 +109,18 @@ int sbi_trap_redirect(struct sbi_trap_regs *regs, struct sbi_scratch *scratch,
 		};
 	}
 
-	/* Update MSTATUS MPV and MTL bits */
+	/* Update MSTATUS MPV bits */
 #if __riscv_xlen == 32
 	regs->mstatusH &= ~MSTATUSH_MPV;
 	regs->mstatusH |= (next_virt) ? MSTATUSH_MPV : 0UL;
-	regs->mstatusH &= ~MSTATUSH_MTL;
 #else
 	regs->mstatus &= ~MSTATUS_MPV;
 	regs->mstatus |= (next_virt) ? MSTATUS_MPV : 0UL;
-	regs->mstatus &= ~MSTATUS_MTL;
 #endif
 
 	/* Update HSTATUS for VS/VU-mode to HS-mode transition */
 	if (misa_extension('H') && prev_virt && !next_virt) {
-		/* Update HSTATUS SP2P, SP2V, SPV, and STL bits */
+		/* Update HSTATUS SP2P, SP2V, and SPV bits */
 		hstatus = csr_read(CSR_HSTATUS);
 		hstatus &= ~HSTATUS_SP2P;
 		hstatus |= (regs->mstatus & MSTATUS_SPP) ? HSTATUS_SP2P : 0;
@@ -129,17 +128,17 @@ int sbi_trap_redirect(struct sbi_trap_regs *regs, struct sbi_scratch *scratch,
 		hstatus |= (hstatus & HSTATUS_SPV) ? HSTATUS_SP2V : 0;
 		hstatus &= ~HSTATUS_SPV;
 		hstatus |= (prev_virt) ? HSTATUS_SPV : 0;
-		hstatus &= ~HSTATUS_STL;
-		hstatus |= (prev_stage2) ? HSTATUS_STL : 0;
 		csr_write(CSR_HSTATUS, hstatus);
+		csr_write(CSR_HTVAL, trap->tval2);
+		csr_write(CSR_HTINST, trap->tinst);
 	}
 
 	/* Update exception related CSRs */
 	if (next_virt) {
 		/* Update VS-mode exception info */
-		csr_write(CSR_VSTVAL, tval);
-		csr_write(CSR_VSEPC, epc);
-		csr_write(CSR_VSCAUSE, cause);
+		csr_write(CSR_VSTVAL, trap->tval);
+		csr_write(CSR_VSEPC, trap->epc);
+		csr_write(CSR_VSCAUSE, trap->cause);
 
 		/* Set MEPC to VS-mode exception vector base */
 		regs->mepc = csr_read(CSR_VSTVEC);
@@ -168,9 +167,9 @@ int sbi_trap_redirect(struct sbi_trap_regs *regs, struct sbi_scratch *scratch,
 		csr_write(CSR_VSSTATUS, vsstatus);
 	} else {
 		/* Update S-mode exception info */
-		csr_write(CSR_STVAL, tval);
-		csr_write(CSR_SEPC, epc);
-		csr_write(CSR_SCAUSE, cause);
+		csr_write(CSR_STVAL, trap->tval);
+		csr_write(CSR_SEPC, trap->epc);
+		csr_write(CSR_SCAUSE, trap->cause);
 
 		/* Set MEPC to S-mode exception vector base */
 		regs->mepc = csr_read(CSR_STVEC);
@@ -205,20 +204,28 @@ int sbi_trap_redirect(struct sbi_trap_regs *regs, struct sbi_scratch *scratch,
  * 1. The 'mscratch' CSR is pointing to sbi_scratch of current HART
  * 2. The 'mcause' CSR is having exception/interrupt cause
  * 3. The 'mtval' CSR is having additional trap information
- * 4. Stack pointer (SP) is setup for current HART
- * 5. Interrupts are disabled in MSTATUS CSR
+ * 4. The 'mtval2' CSR is having additional trap information
+ * 5. The 'mtinst' CSR is having decoded trap instruction
+ * 6. Stack pointer (SP) is setup for current HART
+ * 7. Interrupts are disabled in MSTATUS CSR
  *
  * @param regs pointer to register state
  * @param scratch pointer to sbi_scratch of current HART
  */
-void sbi_trap_handler(struct sbi_trap_regs *regs, struct sbi_scratch *scratch)
+void sbi_trap_handler(struct sbi_trap_regs *regs,
+		      struct sbi_scratch *scratch)
 {
 	int rc = SBI_ENOTSUPP;
 	const char *msg = "trap handler failed";
 	u32 hartid = sbi_current_hartid();
 	ulong mcause = csr_read(CSR_MCAUSE);
-	ulong mtval = csr_read(CSR_MTVAL);
-	struct unpriv_trap *uptrap;
+	ulong mtval = csr_read(CSR_MTVAL), mtval2 = 0, mtinst = 0;
+	struct sbi_trap_info trap, *uptrap;
+
+	if (misa_extension('H')) {
+		mtval2 = csr_read(CSR_MTVAL2);
+		mtinst = csr_read(CSR_MTINST);
+	}
 
 	if (mcause & (1UL << (__riscv_xlen - 1))) {
 		mcause &= ~(1UL << (__riscv_xlen - 1));
@@ -238,15 +245,19 @@ void sbi_trap_handler(struct sbi_trap_regs *regs, struct sbi_scratch *scratch)
 
 	switch (mcause) {
 	case CAUSE_ILLEGAL_INSTRUCTION:
-		rc  = sbi_illegal_insn_handler(hartid, mcause, regs, scratch);
+		rc  = sbi_illegal_insn_handler(hartid, mcause, mtval,
+					       regs, scratch);
 		msg = "illegal instruction handler failed";
 		break;
 	case CAUSE_MISALIGNED_LOAD:
-		rc = sbi_misaligned_load_handler(hartid, mcause, regs, scratch);
+		rc = sbi_misaligned_load_handler(hartid, mcause, mtval,
+						 mtval2, mtinst, regs,
+						 scratch);
 		msg = "misaligned load handler failed";
 		break;
 	case CAUSE_MISALIGNED_STORE:
-		rc  = sbi_misaligned_store_handler(hartid, mcause, regs,
+		rc  = sbi_misaligned_store_handler(hartid, mcause, mtval,
+						   mtval2, mtinst, regs,
 						   scratch);
 		msg = "misaligned store handler failed";
 		break;
@@ -262,25 +273,36 @@ void sbi_trap_handler(struct sbi_trap_regs *regs, struct sbi_scratch *scratch)
 		uptrap = sbi_hart_get_trap_info(scratch);
 		if ((regs->mstatus & MSTATUS_MPRV) && uptrap) {
 			rc = 0;
-			regs->mepc += uptrap->ilen;
+			uptrap->epc = regs->mepc;
+			regs->mepc += 4;
 			uptrap->cause = mcause;
 			uptrap->tval = mtval;
+			uptrap->tval2 = mtval2;
+			uptrap->tinst = mtinst;
 		} else {
-			rc = sbi_trap_redirect(regs, scratch, regs->mepc,
-					       mcause, mtval);
+			trap.epc = regs->mepc;
+			trap.cause = mcause;
+			trap.tval = mtval;
+			trap.tval2 = mtval2;
+			trap.tinst = mtinst;
+			rc = sbi_trap_redirect(regs, &trap, scratch);
 		}
 		msg = "page/access fault handler failed";
 		break;
 	default:
 		/* If the trap came from S or U mode, redirect it there */
-		rc = sbi_trap_redirect(regs, scratch, regs->mepc,
-				       mcause, mtval);
+		trap.epc = regs->mepc;
+		trap.cause = mcause;
+		trap.tval = mtval;
+		trap.tval2 = mtval2;
+		trap.tinst = mtinst;
+		rc = sbi_trap_redirect(regs, &trap, scratch);
 		break;
 	};
 
 trap_error:
 	if (rc) {
-		sbi_trap_error(msg, rc, hartid, mcause, csr_read(CSR_MTVAL),
-			       regs);
+		sbi_trap_error(msg, rc, hartid, mcause, mtval,
+			       mtval2, mtinst, regs);
 	}
 }

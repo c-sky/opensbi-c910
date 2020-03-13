@@ -9,8 +9,21 @@
 
 #include "fw_base.S"
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
+	.global fw_boot_hart
+	/*
+	 * This function is called very early even before
+	 * fw_save_info() is called.
+	 * We can only use a0, a1, and a2 registers here.
+	 * The boot HART id should be returned in 'a0'.
+	 */
+fw_boot_hart:
+	li	a0, -1
+	ret
+
+	.section .entry, "ax", %progbits
+	.align 3
 	.global fw_save_info
 	/*
 	 * We can only use a0, a1, a2, a3, and a4 registers here.
@@ -21,11 +34,13 @@
 fw_save_info:
 	ret
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.global fw_prev_arg1
 	/*
 	 * We can only use a0, a1, and a2 registers here.
+	 * The a0, a1, and a2 registers will be same as passed by
+	 * previous booting stage.
 	 * The previous arg1 should be returned in 'a0'.
 	 */
 fw_prev_arg1:
@@ -36,23 +51,25 @@ fw_prev_arg1:
 #endif
 	ret
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.global fw_next_arg1
 	/*
 	 * We can only use a0, a1, and a2 registers here.
+	 * The a0, a1, and a2 registers will be same as passed by
+	 * previous booting stage.
 	 * The next arg1 should be returned in 'a0'.
 	 */
 fw_next_arg1:
 #ifdef FW_PAYLOAD_FDT_ADDR
 	li	a0, FW_PAYLOAD_FDT_ADDR
 #else
-	add	a0, zero, zero
+	add	a0, a1, zero
 #endif
 	ret
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.global fw_next_addr
 	/*
 	 * We can only use a0, a1, and a2 registers here.
@@ -62,8 +79,8 @@ fw_next_addr:
 	la	a0, payload_bin
 	ret
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.global fw_next_mode
 	/*
 	 * We can only use a0, a1, and a2 registers here.
@@ -73,8 +90,8 @@ fw_next_mode:
 	li	a0, PRV_S
 	ret
 
-	.align 3
 	.section .entry, "ax", %progbits
+	.align 3
 	.global fw_options
 	/*
 	 * We can only use a0, a1, and a2 registers here.
@@ -86,15 +103,15 @@ fw_options:
 	ret
 
 #ifdef FW_PAYLOAD_FDT_PATH
-	.align 4
 	.section .text, "ax", %progbits
+	.align 4
 	.globl fdt_bin
 fdt_bin:
 	.incbin	FW_PAYLOAD_FDT_PATH
 #endif
 
-	.align 4
 	.section .payload, "ax", %progbits
+	.align 4
 	.globl payload_bin
 payload_bin:
 #ifndef FW_PAYLOAD_PATH

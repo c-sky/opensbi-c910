@@ -30,23 +30,31 @@
 
 static void sbi_boot_prints(struct sbi_scratch *scratch, u32 hartid)
 {
+	int xlen;
 	char str[64];
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
 
-	misa_string(str, sizeof(str));
 #ifdef OPENSBI_VERSION_GIT
-	sbi_printf("\nOpenSBI %s (%s %s)\n", OPENSBI_VERSION_GIT,
-		   __DATE__, __TIME__);
+	sbi_printf("\nOpenSBI %s\n", OPENSBI_VERSION_GIT);
 #else
-	sbi_printf("\nOpenSBI v%d.%d (%s %s)\n", OPENSBI_VERSION_MAJOR,
-		   OPENSBI_VERSION_MINOR, __DATE__, __TIME__);
+	sbi_printf("\nOpenSBI v%d.%d\n", OPENSBI_VERSION_MAJOR,
+		   OPENSBI_VERSION_MINOR);
 #endif
 
 	sbi_printf(BANNER);
 
+	/* Determine MISA XLEN and MISA string */
+	xlen = misa_xlen();
+	if (xlen < 1) {
+		sbi_printf("Error %d getting MISA XLEN\n", xlen);
+		sbi_hart_hang();
+	}
+	xlen = 16 * (1 << xlen);
+	misa_string(str, sizeof(str));
+
 	/* Platform details */
 	sbi_printf("Platform Name          : %s\n", sbi_platform_name(plat));
-	sbi_printf("Platform HART Features : RV%d%s\n", misa_xlen(), str);
+	sbi_printf("Platform HART Features : RV%d%s\n", xlen, str);
 	sbi_printf("Platform Max HARTs     : %d\n",
 		   sbi_platform_hart_count(plat));
 	sbi_printf("Current Hart           : %u\n", hartid);
@@ -62,10 +70,18 @@ static void sbi_boot_prints(struct sbi_scratch *scratch, u32 hartid)
 	sbi_hart_pmp_dump(scratch);
 }
 
+static unsigned long init_count_offset;
+
 static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 {
 	int rc;
+	unsigned long *init_count;
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
+
+	init_count_offset = sbi_scratch_alloc_offset(__SIZEOF_POINTER__,
+						     "INIT_COUNT");
+	if (!init_count_offset)
+		sbi_hart_hang();
 
 	rc = sbi_system_early_init(scratch, TRUE);
 	if (rc)
@@ -98,9 +114,13 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 	if (!(scratch->options & SBI_SCRATCH_NO_BOOT_PRINTS))
 		sbi_boot_prints(scratch, hartid);
 
-	if (!sbi_platform_has_hart_hotplug(plat))
-		sbi_hart_wake_coldboot_harts(scratch, hartid);
+	sbi_hart_wake_coldboot_harts(scratch, hartid);
+
 	sbi_hart_mark_available(hartid);
+
+	init_count = sbi_scratch_offset_ptr(scratch, init_count_offset);
+	(*init_count)++;
+
 	sbi_hart_switch_mode(hartid, scratch->next_arg1, scratch->next_addr,
 			     scratch->next_mode, FALSE);
 }
@@ -108,12 +128,12 @@ static void __noreturn init_coldboot(struct sbi_scratch *scratch, u32 hartid)
 static void __noreturn init_warmboot(struct sbi_scratch *scratch, u32 hartid)
 {
 	int rc;
+	unsigned long *init_count;
 	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
 
-	if (!sbi_platform_has_hart_hotplug(plat))
-		sbi_hart_wait_for_coldboot(scratch, hartid);
+	sbi_hart_wait_for_coldboot(scratch, hartid);
 
-	if (sbi_platform_hart_disabled(plat, hartid))
+	if (!init_count_offset)
 		sbi_hart_hang();
 
 	rc = sbi_system_early_init(scratch, FALSE);
@@ -142,13 +162,12 @@ static void __noreturn init_warmboot(struct sbi_scratch *scratch, u32 hartid)
 
 	sbi_hart_mark_available(hartid);
 
-	if (sbi_platform_has_hart_hotplug(plat))
-		/* TODO: To be implemented in-future. */
-		sbi_hart_hang();
-	else
-		sbi_hart_switch_mode(hartid, scratch->next_arg1,
-				     scratch->next_addr,
-				     scratch->next_mode, FALSE);
+	init_count = sbi_scratch_offset_ptr(scratch, init_count_offset);
+	(*init_count)++;
+
+	sbi_hart_switch_mode(hartid, scratch->next_arg1,
+			     scratch->next_addr,
+			     scratch->next_mode, FALSE);
 }
 
 static atomic_t coldboot_lottery = ATOMIC_INITIALIZER(0);
@@ -181,4 +200,51 @@ void __noreturn sbi_init(struct sbi_scratch *scratch)
 		init_coldboot(scratch, hartid);
 	else
 		init_warmboot(scratch, hartid);
+}
+
+unsigned long sbi_init_count(u32 hartid)
+{
+	struct sbi_scratch *scratch;
+	unsigned long *init_count;
+
+	if (sbi_platform_hart_count(sbi_platform_thishart_ptr()) <= hartid ||
+	    !init_count_offset)
+		return 0;
+
+	scratch = sbi_hart_id_to_scratch(sbi_scratch_thishart_ptr(), hartid);
+	init_count = sbi_scratch_offset_ptr(scratch, init_count_offset);
+
+	return *init_count;
+}
+
+/**
+ * Exit OpenSBI library for current HART and stop HART
+ *
+ * The function expects following:
+ * 1. The 'mscratch' CSR is pointing to sbi_scratch of current HART
+ * 2. Stack pointer (SP) is setup for current HART
+ *
+ * @param scratch pointer to sbi_scratch of current HART
+ */
+void __noreturn sbi_exit(struct sbi_scratch *scratch)
+{
+	u32 hartid			= sbi_current_hartid();
+	const struct sbi_platform *plat = sbi_platform_ptr(scratch);
+
+	if (sbi_platform_hart_disabled(plat, hartid))
+		sbi_hart_hang();
+
+	sbi_hart_unmark_available(hartid);
+
+	sbi_platform_early_exit(plat);
+
+	sbi_timer_exit(scratch);
+
+	sbi_ipi_exit(scratch);
+
+	sbi_platform_irqchip_exit(plat);
+
+	sbi_platform_final_exit(plat);
+
+	sbi_hart_hang();
 }

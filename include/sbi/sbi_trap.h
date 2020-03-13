@@ -170,12 +170,28 @@ struct sbi_trap_regs {
 	unsigned long mstatusH;
 } __packed;
 
+/** Representation of trap details */
+struct sbi_trap_info {
+	/** epc Trap program counter */
+	unsigned long epc;
+	/** cause Trap exception cause */
+	unsigned long cause;
+	/** tval Trap value */
+	unsigned long tval;
+	/** tval2 Trap value 2 */
+	unsigned long tval2;
+	/** tinst Trap instruction */
+	unsigned long tinst;
+};
+
 struct sbi_scratch;
 
-int sbi_trap_redirect(struct sbi_trap_regs *regs, struct sbi_scratch *scratch,
-		      ulong epc, ulong cause, ulong tval);
+int sbi_trap_redirect(struct sbi_trap_regs *regs,
+		      struct sbi_trap_info *trap,
+		      struct sbi_scratch *scratch);
 
-void sbi_trap_handler(struct sbi_trap_regs *regs, struct sbi_scratch *scratch);
+void sbi_trap_handler(struct sbi_trap_regs *regs,
+		      struct sbi_scratch *scratch);
 
 #endif
 
